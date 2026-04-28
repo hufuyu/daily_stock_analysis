@@ -1,0 +1,89 @@
+name: Docker Manual Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag version (e.g., v1.0.0, latest)'
+        required: true
+        default: 'v1.0.0'
+
+concurrency:
+  group: docker-manual-publish-${{ github.ref }}-${{ inputs.image_tag }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ${{ github.repository }}:${{ inputs.image_tag }}
+
+jobs:
+  build-and-export:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate release inputs
+        run: |
+          if [[ "${{ inputs.image_tag }}" =~ [[:space:]] ]]; then
+            echo "image_tag must not contain spaces"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+            network=host
+
+      - name: Set up QEMU for multi-platform build
+        uses: docker/setup-qemu-action@v3
+
+      - name: Pre-publish docker smoke
+        run: |
+          docker build -t stock-analysis:manual -f docker/Dockerfile .
+          docker run --rm stock-analysis:manual python -c "
+          from src.config import get_config; print('ok-config')
+          from src.storage import DatabaseManager; print('ok-storage')
+          from src.notification import NotificationService; print('ok-notification')
+          from data_provider import DataFetcherManager; print('ok-data-provider')
+          from src.analyzer import GeminiAnalyzer; print('ok-analyzer')
+          print('manual-smoke-ok')
+          "
+
+      - name: Build image tar
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: ${{ env.IMAGE_NAME }}
+          outputs: type=docker,dest=/tmp/stock-analysis-${{ inputs.image_tag }}.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-analysis-${{ inputs.image_tag }}-image
+          path: /tmp/stock-analysis-${{ inputs.image_tag }}.tar
+          retention-days: 7
+
+      - name: Generate summary
+        run: |
+          echo "### Docker image exported successfully" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image tag: \`${{ inputs.image_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Platforms: linux/amd64, linux/arm64" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact: \`stock-analysis-${{ inputs.image_tag }}-image\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Local load command" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "docker load -i stock-analysis-${{ inputs.image_tag }}.tar" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
